@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebXR Particle Vortex</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; color: white;}
+        /* MP3 업로드 UI */
+        #ui {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            background: radial-gradient(circle, #222 0%, #000 100%); z-index: 100;
+        }
+        .upload-btn {
+            position: relative; overflow: hidden; display: inline-block;
+            padding: 20px 40px; background: linear-gradient(45deg, #aa00ff, #00d4ff);
+            color: white; font-size: 24px; font-weight: bold; border-radius: 50px;
+            cursor: pointer; transition: transform 0.2s; box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+        }
+        .upload-btn:hover { transform: scale(1.05); }
+        .upload-btn input[type=file] {
+            font-size: 100px; position: absolute; left: 0; top: 0; opacity: 0; cursor: pointer;
+        }
+        #instructions { margin-top: 30px; text-align: center; line-height: 1.6; color: #ccc; }
+        #loading { display: none; margin-top: 20px; font-size: 20px; color: #00d4ff; }
+        
+        #hud {
+            position: absolute; top: 10px; width: 100%; text-align: center;
+            pointer-events: none; z-index: 50; display: none; text-shadow: 0 0 5px #000;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <!-- MP3 로드 화면 -->
+    <div id="ui">
+        <h1>Digital Alchemy: Particle Vortex</h1>
+        <div class="upload-btn">
+            <span>MP3 파일 선택하여 의식 시작</span>
+            <input type="file" id="audioInput" accept="audio/*">
+        </div>
+        <div id="loading">오디오 분석 중... 잠시만 기다려주세요.</div>
+        <div id="instructions">
+            1. 신나는 EDM이나 비트세이버 음악(MP3)을 선택하세요.<br>
+            2. 음악이 시작되면 <strong>VR 기기에서 Enter VR</strong>을 누릅니다.<br>
+            3. 컨트롤러의 <strong>트리거 버튼</strong>을 당겨 3단계를 경험하세요.<br>
+            (응축 소용돌이 ➡️ 우주 대폭발 ➡️ 다중 나선의 재탄생)
+        </div>
+    </div>
+
+    <div id="hud">PC: 마우스 드래그로 회전 | 마우스 클릭으로 단계 전환 (상태: 0)</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let audioCtx, analyser, dataArray;
+        
+        // 3단계 입자 시스템 변수
+        let particleGeo, particleSystem;
+        const PARTICLE_COUNT = 30000;
+        let positions, colors, velocities;
+        let phases, radiusOffsets, angles, vortexIds;
+        
+        // 0: 단일 나선, 1: 폭발(Shatter), 2: 다중 나선
+        let currentState = 0; 
+
+        // 다중 볼텍스의 중심 좌표들 (사용자 주변을 둘러쌈)
+        const vortexCenters = [
+            new THREE.Vector3(3, 0, -2), new THREE.Vector3(-3, 0, -2),
+            new THREE.Vector3(0, 0, -4), new THREE.Vector3(2, 0, 2),
+            new THREE.Vector3(-2, 0, 2), new THREE.Vector3(0, 0, 4)
+        ];
+
+        const clock = new THREE.Clock();
+
+        initThreeJS();
+
+        // --- MP3 파일 로드 및 오디오 컨텍스트 초기화 (로컬 구동 핵심) ---
+        document.getElementById('audioInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            document.getElementById('loading').style.display = 'block';
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const arrayBuffer = e.target.result;
+                initAudio(arrayBuffer);
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        function initAudio(arrayBuffer) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            audioCtx.decodeAudioData(arrayBuffer, function(buffer) {
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                source.connect(analyser);
+                analyser.connect(audioCtx.destination);
+                source.loop = true;
+                source.start(0);
+                
+                // UI 숨기고 3D 렌더링 시작
+                document.getElementById('ui').style.display = 'none';
+                document.getElementById('hud').style.display = 'block';
+                document.body.appendChild(VRButton.createButton(renderer));
+                
+                animate();
+            }, function(err) {
+                alert("오디오를 읽을 수 없습니다. 다른 MP3를 시도해 주세요.");
+            });
+        }
+
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.05);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.6, 3); // 사람 눈높이
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 1.5, -2);
+            controls.update();
+
+            // VR 컨트롤러 설정
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                controller.addEventListener('selectstart', triggerStateChange); // 트리거를 당기면 상태 변경
+                scene.add(controller);
+            }
+            
+            // PC 테스트용 클릭 이벤트
+            window.addEventListener('pointerdown', triggerStateChange);
+
+            createParticles();
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createParticles() {
+            particleGeo = new THREE.BufferGeometry();
+            
+            positions = new Float32Array(PARTICLE_COUNT * 3);
+            colors = new Float32Array(PARTICLE_COUNT * 3);
+            
+            // 물리 및 애니메이션 연산을 위한 커스텀 배열들
+            velocities = new Float32Array(PARTICLE_COUNT * 3);
+            phases = new Float32Array(PARTICLE_COUNT); // 입자의 수직 위치 (0.0 ~ 1.0)
+            angles = new Float32Array(PARTICLE_COUNT); // 기본 각도
+            radiusOffsets = new Float32Array(PARTICLE_COUNT); // 입자가 기둥 중심에서 떨어진 거리
+            vortexIds = new Int32Array(PARTICLE_COUNT); // 다중 나선 시 소속 그룹
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                phases[i] = Math.random();
+                angles[i] = Math.random() * Math.PI * 2;
+                radiusOffsets[i] = (Math.random() - 0.5) * 1.5;
+                vortexIds[i] = Math.floor(Math.random() * 6);
+                
+                // 초기 위치
+                positions[i*3] = (Math.random() - 0.5) * 10;
+                positions[i*3+1] = Math.random() * 15;
+                positions[i*3+2] = (Math.random() - 0.5) * 10;
+            }
+
+            particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const particleMat = new THREE.PointsMaterial({
+                size: 0.05,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particleSystem = new THREE.Points(particleGeo, particleMat);
+            scene.add(particleSystem);
+        }
+
+        // --- 마법적 의식 전환 (트리거) ---
+        function triggerStateChange() {
+            currentState = (currentState + 1) % 3;
+            document.getElementById('hud').innerText = `PC: 마우스 드래그로 회전 | 마우스 클릭으로 단계 전환 (상태: ${currentState})`;
+
+            if (currentState === 1) {
+                // 폭발 상태 진입: 현재 위치에서 사방으로 터지는 물리량(Velocity) 주입
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    let idx = i * 3;
+                    // 바깥으로 향하는 벡터 생성
+                    let vx = (Math.random() - 0.5) * 20.0 + (positions[idx] * 0.5);
+                    let vy = (Math.random() - 0.5) * 20.0;
+                    let vz = (Math.random() - 0.5) * 20.0 + (positions[idx+2] * 0.5);
+                    
+                    velocities[idx] = vx;
+                    velocities[idx+1] = vy;
+                    velocities[idx+2] = vz;
+                }
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        // --- 핵심 로직: 음악 반응 및 GPU/CPU 하이브리드 파티클 엔진 ---
+        function render() {
+            const time = clock.getElapsedTime();
+            const delta = Math.min(clock.getDelta(), 0.1);
+
+            let bass = 0, mid = 0, treble = 0;
+            if (analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                // 주파수 대역별 에너지 추출
+                for(let i=0; i<10; i++) bass += dataArray[i]; bass /= 10;
+                for(let i=20; i<50; i++) mid += dataArray[i]; mid /= 30;
+                for(let i=80; i<120; i++) treble += dataArray[i]; treble /= 40;
+            }
+            
+            const bassNorm = bass / 255.0; // 0.0 ~ 1.0
+
+            const colorObj = new THREE.Color();
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                let idx = i * 3;
+
+                // 1. 위로 올라가는 생명 주기 제어
+                phases[i] += delta * 0.15; 
+                if (phases[i] > 1.0) phases[i] -= 1.0; // 끝까지 가면 바닥으로 리스폰
+
+                let y = phases[i] * 15; // 높이 0 ~ 15미터
+                let angle = angles[i] + time * (1.0 + bassNorm * 2.0); // 베이스 칠 때 회전 속도 증가
+                
+                let targetX = 0, targetZ = 0;
+
+                // 2. 상태별 목표 위치(Target Position) 수학적 모델링
+                if (currentState === 0) {
+                    // [상태 0] 단일 거대 나선 (가운데)
+                    let r = 0.5 + (y * 0.15) + radiusOffsets[i]; // 위로 갈수록 퍼지는 깔때기 모양
+                    r += bassNorm * 2.5; // 베이스에 맞춰 소용돌이 팽창
+                    targetX = Math.cos(angle) * r;
+                    targetZ = Math.sin(angle) * r - 2;
+                } 
+                else if (currentState === 2) {
+                    // [상태 2] 다중 나선 (분열된 6개의 볼텍스)
+                    let vId = vortexIds[i];
+                    let cx = vortexCenters[vId].x;
+                    let cz = vortexCenters[vId].z;
+                    
+                    let r = 0.2 + (y * 0.05) + (radiusOffsets[i] * 0.5);
+                    // 각 기둥마다 다른 주파수(Mid/Treble)에 반응하여 고동침
+                    r += (dataArray[10 + vId*5] / 255.0) * 1.5; 
+                    
+                    targetX = cx + Math.cos(angle * 2.0) * r;
+                    targetZ = cz + Math.sin(angle * 2.0) * r;
+                }
+
+                // 3. 입자 이동 (물리 및 보간)
+                if (currentState === 1) {
+                    // [상태 1] 무중력 대폭발 (Shatter)
+                    positions[idx] += velocities[idx] * delta;
+                    positions[idx+1] += velocities[idx+1] * delta;
+                    positions[idx+2] += velocities[idx+2] * delta;
+                    
+                    // 우주적 마찰력(Drag) 적용
+                    velocities[idx] *= 0.95;
+                    velocities[idx+1] *= 0.95;
+                    velocities[idx+2] *= 0.95;
+                    
+                    // 폭발 상태에서는 위로 올라가는 생명 주기 리셋을 보류하여 별처럼 흩어지게 둠
+                    y = positions[idx+1]; 
+                } else {
+                    // 상태 0 또는 2: 목표 형태를 향해 자석처럼 부드럽게 이끌림(Lerp)
+                    positions[idx] += (targetX - positions[idx]) * 0.05;
+                    positions[idx+1] = y; // y축은 강제로 생명 주기를 따름
+                    positions[idx+2] += (targetZ - positions[idx+2]) * 0.05;
+                }
+
+                // 4. 동적 컬러링 (높이와 베이스 수치에 따라 그라데이션)
+                let hue = (y / 15) + time * 0.1 + (currentState * 0.3); // 상태별로 색조 시프트
+                colorObj.setHSL(hue % 1.0, 0.9, 0.4 + (bassNorm * 0.4)); // 쿵쿵 칠 때 밝아짐
+                colors[idx] = colorObj.r;
+                colors[idx+1] = colorObj.g;
+                colors[idx+2] = colorObj.b;
+            }
+
+            particleGeo.attributes.position.needsUpdate = true;
+            particleGeo.attributes.color.needsUpdate = true;
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
